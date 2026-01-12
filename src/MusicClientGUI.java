@@ -20,7 +20,7 @@ public class MusicClientGUI extends JFrame {
     private volatile boolean isSkipping = false; 
     
     // Control de slider
-    private volatile boolean isDraggingSlider = false; // Para no actualizar mientras mueves la bolita
+    private volatile boolean isDraggingSlider = false; // Para no actualizar mientras se mueve la bolita
 
     private volatile int lastAckedSeq = -1;
     private volatile int currentSeqNum = 0; 
@@ -34,10 +34,10 @@ public class MusicClientGUI extends JFrame {
     private JTextField txtSearch;
     private JLabel lblStatus, lblTime; 
     
-    // Slider para interacción
+    
     private JSlider seekSlider; 
     
-    // SOLO dejamos Play, Pause, Search y Refresh
+    
     private JButton btnPlay, btnPause, btnSearch, btnRefresh;
     private JTextArea listArea;
 
@@ -106,7 +106,7 @@ public class MusicClientGUI extends JFrame {
                 isDraggingSlider = false;
                 if (isPlaying) {
                     int val = seekSlider.getValue();
-                    doSeek(val); // Enviamos comando al soltar
+                    doSeek(val); 
                 }
             }
         });
@@ -115,21 +115,21 @@ public class MusicClientGUI extends JFrame {
         centerPanel.add(lblTime);
         centerPanel.add(seekSlider);
 
-        // --- BOTTOM (CONTROLES) ---
+        // controles
         JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 15, 10));
         
-        // Solo instanciamos Pausa y Reanudar
+        
         btnPause = new JButton("⏸ Pausa");
         btnPlay = new JButton("▶ Reanudar");
 
-        Dimension btnSize = new Dimension(120, 40); // Un poco más anchos
+        Dimension btnSize = new Dimension(120, 40); 
         btnPause.setPreferredSize(btnSize);
         btnPlay.setPreferredSize(btnSize);
         
         btnPause.setEnabled(false);
         btnPlay.setEnabled(false);
 
-        // Agregamos solo estos dos al panel
+        
         bottomPanel.add(btnPause);
         bottomPanel.add(btnPlay);
 
@@ -137,11 +137,11 @@ public class MusicClientGUI extends JFrame {
         add(centerPanel, BorderLayout.CENTER);
         add(bottomPanel, BorderLayout.SOUTH);
 
-        // --- ACCIONES ---
+        
         btnRefresh.addActionListener(e -> refreshServers());
         btnSearch.addActionListener(e -> startSearch());
         
-        // Botones de skip/rewind ELIMINADOS
+        
 
         btnPause.addActionListener(e -> {
             sendControlMessage("PAUSE");
@@ -165,14 +165,14 @@ public class MusicClientGUI extends JFrame {
     private void doSeek(int targetPacket) {
         isSkipping = true; 
         audioQueue.clear();
-        // Enviamos el comando de SEEK al servidor
+        
         sendControlMessage("SEEK:" + targetPacket);
         lblStatus.setText("Buscando...");
-        // Ajustamos localmente para respuesta inmediata en UI
+        
         currentSeqNum = targetPacket; 
     }
 
-    // --- LÓGICA DE RED ---
+    //LÓGICA DE RED
 
     private void refreshServers() {
         listArea.setText("Buscando servidores...\n");
@@ -278,7 +278,7 @@ public class MusicClientGUI extends JFrame {
                 
                 String strData = new String(packet.getData(), 0, packet.getLength());
                 
-                // --- MANEJO DE METADATA (DURACIÓN TOTAL) ---
+                // Manejo de la metadata (duración total)
                 if (strData.startsWith("META:")) {
                     totalSeqNum = Integer.parseInt(strData.split(":")[1]);
                     SwingUtilities.invokeLater(() -> seekSlider.setMaximum(totalSeqNum));

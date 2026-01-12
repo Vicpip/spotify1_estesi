@@ -5,7 +5,7 @@ import java.util.concurrent.*;
 import javax.sound.sampled.*;
 
 public class MusicClient {
-    // Puertos de los 3 servidores conocidos
+    // Puertos de los 3 servidores 
     private static final int[] SERVER_PORTS = {9001, 9002, 9003};
     private static final String SERVER_HOST = "localhost";
     
@@ -34,7 +34,7 @@ public class MusicClient {
                 
                 if (input.equalsIgnoreCase("EXIT")) break;
                 
-                // 1. Buscar en los 3 servidores
+                // Buscar en los 3 servidores
                 int foundPort = searchSongInServers(input);
                 
                 if (foundPort != -1) {
@@ -50,7 +50,7 @@ public class MusicClient {
         }
     }
 
-    // Busca la canción enviando paquetes a los 3 puertos conocidos
+    
     private int searchSongInServers(String songName) {
         for (int port : SERVER_PORTS) {
             try {
@@ -60,7 +60,7 @@ public class MusicClient {
                 DatagramPacket packet = new DatagramPacket(data, data.length, InetAddress.getByName(SERVER_HOST), port);
                 socket.send(packet);
                 
-                // Esperar respuesta brevemente
+            
                 socket.setSoTimeout(500); 
                 byte[] buffer = new byte[256];
                 DatagramPacket response = new DatagramPacket(buffer, buffer.length);
@@ -72,7 +72,7 @@ public class MusicClient {
                         return port;
                     }
                 } catch (SocketTimeoutException e) {
-                    // No respondió este servidor, intentar siguiente
+                    
                 }
                 
             } catch (IOException e) {
@@ -115,20 +115,20 @@ public class MusicClient {
     // Receptor Go-Back-N
     private void receiverGBNLoop() {
         int expectedSeq = 0;
-        byte[] buffer = new byte[1028]; // 4 bytes header + 1024 data
+        byte[] buffer = new byte[1028]; 
 
         try {
             while (isPlaying) {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 socket.receive(packet);
                 
-                // Guardar la dirección del socket efímero del servidor para enviar controles
+                
                 if (currentServerPort != packet.getPort()) {
                     currentServerPort = packet.getPort();
                     currentServerIP = packet.getAddress();
                 }
 
-                // Verificar si es señal de fin
+                
                 String strData = new String(packet.getData(), 0, packet.getLength());
                 if (strData.equals("END")) {
                     System.out.println("Fin de la canción.");
@@ -136,19 +136,20 @@ public class MusicClient {
                     break;
                 }
                 
-                // Extraer SeqNum
+                
                 int seqNum = ((buffer[0] & 0xFF) << 24) | 
                              ((buffer[1] & 0xFF) << 16) | 
                              ((buffer[2] & 0xFF) << 8)  | 
                              (buffer[3] & 0xFF);
 
-                // Lógica GBN: ¿Es el paquete que esperábamos?
+                // Lógica GBN
                 if (seqNum == expectedSeq) {
+
                     // Extraer audio
                     byte[] audioData = new byte[packet.getLength() - 4];
                     System.arraycopy(packet.getData(), 4, audioData, 0, audioData.length);
                     
-                    // Meter en buffer de reproducción
+                    
                     audioQueue.offer(audioData);
                     
                     // Enviar ACK
@@ -169,8 +170,8 @@ public class MusicClient {
     // Hilo que saca bytes de la cola y los manda a los parlantes
     private void audioPlayerWorker() {
         try {
-            // Formato estándar WAV (PCM Signed, 44100Hz, 16 bit, Stereo)
-            // IMPORTANTE: Asegúrate que tus .wav tengan este formato o sonará ruido.
+            // Formato estándar WAV 
+            
             AudioFormat format = new AudioFormat(44100, 16, 2, true, false);
             DataLine.Info info = new DataLine.Info(SourceDataLine.class, format);
             SourceDataLine line = (SourceDataLine) AudioSystem.getLine(info);
@@ -192,14 +193,14 @@ public class MusicClient {
         }
     }
 
-    // Loop para leer comandos del usuario mientras suena la música
+    
     private void controlLoop() {
         Scanner sc = new Scanner(System.in);
         System.out.println(">> Comandos: [P]ausa, [R]eanudar, [A]delantar, [S]ig. Canción");
         
         while (isPlaying) {
             String cmd = sc.nextLine().toUpperCase();
-            if (!isPlaying) break; // Si la canción terminó sola
+            if (!isPlaying) break; 
 
             switch (cmd) {
                 case "P":
