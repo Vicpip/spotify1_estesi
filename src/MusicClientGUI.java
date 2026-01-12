@@ -1,4 +1,5 @@
 import java.awt.*;
+import java.awt.event.*;
 import java.net.*;
 import java.util.concurrent.*;
 import javax.sound.sampled.*;
@@ -17,9 +18,13 @@ public class MusicClientGUI extends JFrame {
     private volatile boolean isPlaying = false;
     private volatile boolean isPaused = false;
     private volatile boolean isSkipping = false; 
+    
+    // Control de slider
+    private volatile boolean isDraggingSlider = false; // Para no actualizar mientras mueves la bolita
 
     private volatile int lastAckedSeq = -1;
     private volatile int currentSeqNum = 0; 
+    private volatile int totalSeqNum = 0; // Total de paquetes de la canción
     
     private BlockingQueue<byte[]> audioQueue = new LinkedBlockingQueue<>(500);
     private Thread receiverThread;
@@ -28,12 +33,16 @@ public class MusicClientGUI extends JFrame {
     // UI
     private JTextField txtSearch;
     private JLabel lblStatus, lblTime; 
-    private JProgressBar progressBar; 
-    private JButton btnPlay, btnPause, btnSkip, btnRewind, btnSearch, btnRefresh;
+    
+    // Slider para interacción
+    private JSlider seekSlider; 
+    
+    // SOLO dejamos Play, Pause, Search y Refresh
+    private JButton btnPlay, btnPause, btnSearch, btnRefresh;
     private JTextArea listArea;
 
     public MusicClientGUI() {
-        super("Mini Spotify - Robust Client");
+        super("Mini Spotify - Seekable");
         initNetwork();
         initUI();
         refreshServers(); 
@@ -78,38 +87,51 @@ public class MusicClientGUI extends JFrame {
         
         lblStatus = new JLabel("Listo.", SwingConstants.CENTER);
         lblStatus.setFont(new Font("Arial", Font.BOLD, 14));
-        lblTime = new JLabel("00:00", SwingConstants.CENTER);
+        lblTime = new JLabel("00:00 / 00:00", SwingConstants.CENTER);
         lblTime.setFont(new Font("Monospaced", Font.BOLD, 16));
-        progressBar = new JProgressBar(0, 100);
-        progressBar.setValue(0);
+        
+        // --- SLIDER INTERACTIVO ---
+        seekSlider = new JSlider(0, 100, 0);
+        seekSlider.setEnabled(false); // Se activa al reproducir
+        
+        // Listener para detectar cuando el usuario mueve la bolita
+        seekSlider.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                isDraggingSlider = true; // Pausamos actualización automática visual
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                isDraggingSlider = false;
+                if (isPlaying) {
+                    int val = seekSlider.getValue();
+                    doSeek(val); // Enviamos comando al soltar
+                }
+            }
+        });
 
         centerPanel.add(lblStatus);
         centerPanel.add(lblTime);
-        centerPanel.add(progressBar);
+        centerPanel.add(seekSlider);
 
         // --- BOTTOM (CONTROLES) ---
         JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 15, 10));
         
-        btnRewind = new JButton("⏪ Atrasar");
+        // Solo instanciamos Pausa y Reanudar
         btnPause = new JButton("⏸ Pausa");
         btnPlay = new JButton("▶ Reanudar");
-        btnSkip = new JButton("⏩ Adelantar");
 
-        Dimension btnSize = new Dimension(100, 40);
-        btnRewind.setPreferredSize(btnSize);
+        Dimension btnSize = new Dimension(120, 40); // Un poco más anchos
         btnPause.setPreferredSize(btnSize);
         btnPlay.setPreferredSize(btnSize);
-        btnSkip.setPreferredSize(btnSize);
         
-        btnRewind.setEnabled(false);
         btnPause.setEnabled(false);
         btnPlay.setEnabled(false);
-        btnSkip.setEnabled(false);
 
-        bottomPanel.add(btnRewind); 
+        // Agregamos solo estos dos al panel
         bottomPanel.add(btnPause);
         bottomPanel.add(btnPlay);
-        bottomPanel.add(btnSkip);
 
         add(topPanel, BorderLayout.NORTH);
         add(centerPanel, BorderLayout.CENTER);
@@ -119,24 +141,8 @@ public class MusicClientGUI extends JFrame {
         btnRefresh.addActionListener(e -> refreshServers());
         btnSearch.addActionListener(e -> startSearch());
         
-        // 1. ADELANTAR
-        btnSkip.addActionListener(e -> {
-            isSkipping = true; 
-            // Enviamos 3 veces por si UDP pierde uno
-            for(int i=0; i<3; i++) sendControlMessage("SKIP:FAST");
-            audioQueue.clear();
-            lblStatus.setText("Adelantando...");
-        });
+        // Botones de skip/rewind ELIMINADOS
 
-        // 2. ATRASAR
-        btnRewind.addActionListener(e -> {
-            isSkipping = true; 
-            for(int i=0; i<3; i++) sendControlMessage("REWIND");
-            audioQueue.clear(); 
-            lblStatus.setText("Retrocediendo...");
-        });
-
-        // 3. PAUSA
         btnPause.addActionListener(e -> {
             sendControlMessage("PAUSE");
             isPaused = true;
@@ -145,18 +151,25 @@ public class MusicClientGUI extends JFrame {
             lblStatus.setText("Pausado");
         });
 
-        // 4. REANUDAR
         btnPlay.addActionListener(e -> {
             isPaused = false;
-            // Enviamos RESUME varias veces para despertar al servidor
             for(int i=0; i<3; i++) sendControlMessage("RESUME");
-            // Recordamos al servidor dónde nos quedamos
             if (lastAckedSeq != -1) sendControlMessage("ACK:" + lastAckedSeq);
-            
             btnPause.setEnabled(true);
             btnPlay.setEnabled(false);
             lblStatus.setText("Reproduciendo...");
         });
+    }
+    
+    // Método para saltar a posición específica (Usado por el slider)
+    private void doSeek(int targetPacket) {
+        isSkipping = true; 
+        audioQueue.clear();
+        // Enviamos el comando de SEEK al servidor
+        sendControlMessage("SEEK:" + targetPacket);
+        lblStatus.setText("Buscando...");
+        // Ajustamos localmente para respuesta inmediata en UI
+        currentSeqNum = targetPacket; 
     }
 
     // --- LÓGICA DE RED ---
@@ -218,18 +231,19 @@ public class MusicClientGUI extends JFrame {
         isPaused = false;
         isSkipping = false;
         audioQueue.clear();
-        progressBar.setValue(0);
-        lblTime.setText("00:00");
+        seekSlider.setValue(0);
+        lblTime.setText("00:00 / 00:00");
         lastAckedSeq = -1;
         currentSeqNum = 0; 
+        totalSeqNum = 0; // Resetear total
+        
         try { Thread.sleep(200); } catch(Exception e){}
         currentServerPort = port;
         isPlaying = true;
         
-        btnRewind.setEnabled(true);
         btnPause.setEnabled(true);
         btnPlay.setEnabled(false);
-        btnSkip.setEnabled(true);
+        seekSlider.setEnabled(true); // Habilitar slider
         lblStatus.setText("Conectando...");
 
         try {
@@ -249,14 +263,13 @@ public class MusicClientGUI extends JFrame {
     private void receiverLoop() {
         int expectedSeq = 0;
         byte[] buffer = new byte[1028];
-        int packetsSinceSkip = 0; // CONTADOR DE SEGURIDAD
+        int packetsSinceSkip = 0;
 
         while (isPlaying) {
             try {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 socket.receive(packet);
                 
-                // Si estamos pausados, drenamos el socket pero no procesamos.
                 if (isPaused) {
                     continue;
                 }
@@ -264,16 +277,23 @@ public class MusicClientGUI extends JFrame {
                 if (packet.getPort() != currentServerPort) currentServerPort = packet.getPort();
                 
                 String strData = new String(packet.getData(), 0, packet.getLength());
+                
+                // --- MANEJO DE METADATA (DURACIÓN TOTAL) ---
+                if (strData.startsWith("META:")) {
+                    totalSeqNum = Integer.parseInt(strData.split(":")[1]);
+                    SwingUtilities.invokeLater(() -> seekSlider.setMaximum(totalSeqNum));
+                    continue;
+                }
+                
                 if (strData.startsWith("LIST") || strData.startsWith("FOUND")) continue;
                 if (strData.equals("END")) {
                     isPlaying = false;
                     SwingUtilities.invokeLater(() -> {
                         lblStatus.setText("Fin.");
-                        btnRewind.setEnabled(false);
                         btnPause.setEnabled(false);
-                        btnSkip.setEnabled(false);
                         btnSearch.setEnabled(true);
-                        progressBar.setValue(100);
+                        seekSlider.setValue(seekSlider.getMaximum());
+                        seekSlider.setEnabled(false);
                     });
                     break;
                 }
@@ -357,12 +377,23 @@ public class MusicClientGUI extends JFrame {
                     
                     if (!isSkipping) {
                         long estimatedBytes = currentSeqNum * 1024L;
-                        long seconds = estimatedBytes / bytesPerSecond;
-                        long min = seconds / 60;
-                        long sec = seconds % 60;
+                        long currentSeconds = estimatedBytes / bytesPerSecond;
+                        
+                        // Cálculo de tiempo total
+                        long totalBytes = totalSeqNum * 1024L;
+                        long totalSeconds = totalBytes / bytesPerSecond;
+                        if (totalSeconds == 0) totalSeconds = 1; // Evitar /0 visual
+
+                        String timeStr = String.format("%02d:%02d / %02d:%02d", 
+                                currentSeconds / 60, currentSeconds % 60,
+                                totalSeconds / 60, totalSeconds % 60);
+
                         SwingUtilities.invokeLater(() -> {
-                            lblTime.setText(String.format("%02d:%02d", min, sec));
-                            progressBar.setValue((int)(seconds % 100)); 
+                            lblTime.setText(timeStr);
+                            // Solo actualizamos el slider si el usuario NO lo está arrastrando
+                            if (!isDraggingSlider) {
+                                seekSlider.setValue(currentSeqNum);
+                            }
                         });
                     }
                 }

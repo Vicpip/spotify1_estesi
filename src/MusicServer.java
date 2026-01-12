@@ -28,11 +28,9 @@ public class MusicServer {
 
         try (DatagramSocket socket = new DatagramSocket(port)) {
             while (true) {
-                // Buffer fresco para cada petición inicial
                 byte[] buffer = new byte[1024];
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 socket.receive(packet);
-                // Procesar en un hilo independiente
                 new Thread(() -> handleRequest(socket, packet)).start();
             }
         } catch (Exception e) {
@@ -90,17 +88,21 @@ public class MusicServer {
         return null;
     }
 
-    // --- LÓGICA DE STREAMING CON REWIND Y SKIP ---
     private void startStreamingGBN(String filename, InetAddress clientIP, int clientPort) {
         File file = findFileRobust(filename);
         if (file == null) return;
 
         try (DatagramSocket streamSocket = new DatagramSocket()) {
-            streamSocket.setSoTimeout(100); // Timeout breve para revisar comandos
+            streamSocket.setSoTimeout(100); 
             
             byte[] fileBytes = java.nio.file.Files.readAllBytes(file.toPath());
             int totalPackets = (int) Math.ceil((double) fileBytes.length / DATA_SIZE);
             
+            // 1. Enviar Metadata (Total de paquetes para la barra de progreso)
+            String metaMsg = "META:" + totalPackets;
+            streamSocket.send(new DatagramPacket(metaMsg.getBytes(), metaMsg.length(), clientIP, clientPort));
+            Thread.sleep(50); 
+
             int base = 0; 
             int nextSeqNum = 0;
             boolean paused = false; 
@@ -108,20 +110,16 @@ public class MusicServer {
             long lastCommandTime = 0;
 
             while (base < totalPackets && !finished) {
-                // 1. Enviar ventana
+                // Enviar ventana
                 while (nextSeqNum < base + WINDOW_SIZE && nextSeqNum < totalPackets) {
-                    // FIX CRÍTICO: Si está pausado, salimos del bucle de envío 
-                    // para escuchar si llega el comando RESUME.
-                    if (paused) {
-                        break; 
-                    }
+                    if (paused) break; // Si está en pausa, deja de enviar y escucha comandos
 
                     byte[] packetData = createPacket(nextSeqNum, fileBytes);
                     streamSocket.send(new DatagramPacket(packetData, packetData.length, clientIP, clientPort));
                     nextSeqNum++;
                 }
 
-                // 2. Escuchar ACKs o Comandos
+                // Escuchar ACKs o Comandos
                 try {
                     byte[] ackBuff = new byte[1024];
                     DatagramPacket ackP = new DatagramPacket(ackBuff, ackBuff.length);
@@ -130,24 +128,31 @@ public class MusicServer {
                     
                     if (msg.startsWith("ACK:")) {
                         int ack = Integer.parseInt(msg.split(":")[1]);
-                        if (ack >= base) {
+                        // Validación para evitar saltos locos al rebobinar
+                        if (ack >= base && ack < base + 200) {
                             base = ack + 1;
                         }
                     }
                     else if (msg.equals("PAUSE")) {
                         paused = true;
-                        System.out.println("Pausado para " + clientPort);
                     }
                     else if (msg.equals("RESUME")) {
                         paused = false;
-                        System.out.println("Reanudado para " + clientPort);
+                    }
+                    else if (msg.startsWith("SEEK:")) {
+                        // Salto directo desde la barra de progreso
+                        int targetSeq = Integer.parseInt(msg.split(":")[1]);
+                        if (targetSeq < 0) targetSeq = 0;
+                        if (targetSeq >= totalPackets) targetSeq = totalPackets - 1;
+                        base = targetSeq;
+                        nextSeqNum = base;
+                        System.out.println("Seek to: " + base);
                     }
                     else if (msg.startsWith("SKIP:")) { 
                         if (System.currentTimeMillis() - lastCommandTime > 200) {
                             base += 400; 
                             if (base >= totalPackets) base = totalPackets - 1;
                             nextSeqNum = base; 
-                            System.out.println(">> Salto adelante a: " + base);
                             lastCommandTime = System.currentTimeMillis();
                         }
                     }
@@ -156,7 +161,6 @@ public class MusicServer {
                             base -= 400; 
                             if (base < 0) base = 0; 
                             nextSeqNum = base;
-                            System.out.println("<< Rebobinado a: " + base);
                             lastCommandTime = System.currentTimeMillis();
                         }
                     }
@@ -165,8 +169,6 @@ public class MusicServer {
                     }
                     
                 } catch (SocketTimeoutException e) {
-                    // Timeout esperando ACK: reenviar ventana
-                    // Si estaba pausado, esto ocurrirá constantemente (loop de espera), lo cual está bien.
                     nextSeqNum = base;
                 }
             }
