@@ -19,7 +19,6 @@ public class MusicClientGUI extends JFrame {
     private volatile boolean isSkipping = false; 
 
     private volatile int lastAckedSeq = -1;
-    // NUEVO: Variable global para rastrear la posición real de la canción y actualizar la barra
     private volatile int currentSeqNum = 0; 
     
     private BlockingQueue<byte[]> audioQueue = new LinkedBlockingQueue<>(500);
@@ -34,7 +33,7 @@ public class MusicClientGUI extends JFrame {
     private JTextArea listArea;
 
     public MusicClientGUI() {
-        super("Mini Spotify - Full Control");
+        super("Mini Spotify - Robust Client");
         initNetwork();
         initUI();
         refreshServers(); 
@@ -123,7 +122,8 @@ public class MusicClientGUI extends JFrame {
         // 1. ADELANTAR
         btnSkip.addActionListener(e -> {
             isSkipping = true; 
-            sendControlMessage("SKIP:FAST");
+            // Enviamos 3 veces por si UDP pierde uno
+            for(int i=0; i<3; i++) sendControlMessage("SKIP:FAST");
             audioQueue.clear();
             lblStatus.setText("Adelantando...");
         });
@@ -131,7 +131,7 @@ public class MusicClientGUI extends JFrame {
         // 2. ATRASAR
         btnRewind.addActionListener(e -> {
             isSkipping = true; 
-            sendControlMessage("REWIND");
+            for(int i=0; i<3; i++) sendControlMessage("REWIND");
             audioQueue.clear(); 
             lblStatus.setText("Retrocediendo...");
         });
@@ -148,8 +148,11 @@ public class MusicClientGUI extends JFrame {
         // 4. REANUDAR
         btnPlay.addActionListener(e -> {
             isPaused = false;
-            sendControlMessage("RESUME");
+            // Enviamos RESUME varias veces para despertar al servidor
+            for(int i=0; i<3; i++) sendControlMessage("RESUME");
+            // Recordamos al servidor dónde nos quedamos
             if (lastAckedSeq != -1) sendControlMessage("ACK:" + lastAckedSeq);
+            
             btnPause.setEnabled(true);
             btnPlay.setEnabled(false);
             lblStatus.setText("Reproduciendo...");
@@ -218,7 +221,7 @@ public class MusicClientGUI extends JFrame {
         progressBar.setValue(0);
         lblTime.setText("00:00");
         lastAckedSeq = -1;
-        currentSeqNum = 0; // Resetear posición
+        currentSeqNum = 0; 
         try { Thread.sleep(200); } catch(Exception e){}
         currentServerPort = port;
         isPlaying = true;
@@ -246,11 +249,18 @@ public class MusicClientGUI extends JFrame {
     private void receiverLoop() {
         int expectedSeq = 0;
         byte[] buffer = new byte[1028];
+        int packetsSinceSkip = 0; // CONTADOR DE SEGURIDAD
 
         while (isPlaying) {
             try {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 socket.receive(packet);
+                
+                // Si estamos pausados, drenamos el socket pero no procesamos.
+                if (isPaused) {
+                    continue;
+                }
+
                 if (packet.getPort() != currentServerPort) currentServerPort = packet.getPort();
                 
                 String strData = new String(packet.getData(), 0, packet.getLength());
@@ -272,28 +282,35 @@ public class MusicClientGUI extends JFrame {
                     int seqNum = ((buffer[0] & 0xFF) << 24) | ((buffer[1] & 0xFF) << 16) | 
                                  ((buffer[2] & 0xFF) << 8)  | (buffer[3] & 0xFF);
 
-                    // LOGICA DE SALTO MEJORADA
                     if (isSkipping) {
-                        // FIX: Bajamos la tolerancia de 50 a 10.
-                        // Esto permite "Rewinds" cortos (cerca del inicio) sin ser ignorados.
-                        if (Math.abs(seqNum - expectedSeq) > 10) {
+                        boolean jumpDetected = Math.abs(seqNum - expectedSeq) > 10;
+                        if (jumpDetected) {
                             expectedSeq = seqNum; 
                             isSkipping = false;
+                            packetsSinceSkip = 0;
                             SwingUtilities.invokeLater(() -> lblStatus.setText("Reproduciendo..."));
                         } else {
-                            // Paquete ambiguo o viejo, ignorar
-                            continue;
+                            packetsSinceSkip++;
+                            if (packetsSinceSkip > 20) {
+                                isSkipping = false;
+                                packetsSinceSkip = 0;
+                                expectedSeq = seqNum; 
+                                SwingUtilities.invokeLater(() -> lblStatus.setText("Sincronizado (Timeout)"));
+                            } else {
+                                continue;
+                            }
                         }
                     }
 
                     if (seqNum == expectedSeq) {
                         byte[] audio = new byte[packet.getLength() - 4];
                         System.arraycopy(packet.getData(), 4, audio, 0, audio.length);
-                        if (!isPaused) audioQueue.offer(audio, 1, TimeUnit.SECONDS);
+                        
+                        audioQueue.offer(audio, 1, TimeUnit.SECONDS);
                         sendControlMessage("ACK:" + seqNum);
                         
                         lastAckedSeq = seqNum;
-                        currentSeqNum = seqNum; // Actualizamos la posición global para la UI
+                        currentSeqNum = seqNum;
                         expectedSeq++;
                     } else {
                         sendControlMessage("ACK:" + (expectedSeq - 1));
@@ -330,7 +347,7 @@ public class MusicClientGUI extends JFrame {
             SwingUtilities.invokeLater(() -> lblStatus.setText("Reproduciendo (" + finalRate + "Hz)"));
 
             long bytesPerSecond = (long)(rate * channels * (bits / 8.0));
-            if (bytesPerSecond == 0) bytesPerSecond = 176400; // Evitar div by zero
+            if (bytesPerSecond == 0) bytesPerSecond = 176400; 
             
             while (isPlaying) {
                 if (isPaused) { Thread.sleep(100); continue; }
@@ -339,9 +356,6 @@ public class MusicClientGUI extends JFrame {
                     line.write(data, 0, data.length);
                     
                     if (!isSkipping) {
-                        // FIX UI: Usamos currentSeqNum para calcular el tiempo real
-                        // en lugar de sumar bytes ciegamente.
-                        // Cada paquete es ~1024 bytes de audio (más headers, pero simplificamos a 1024 data)
                         long estimatedBytes = currentSeqNum * 1024L;
                         long seconds = estimatedBytes / bytesPerSecond;
                         long min = seconds / 60;

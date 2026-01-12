@@ -20,7 +20,6 @@ public class MusicServer {
             return;
         } else {
             System.out.println("Carpeta OK: " + folder.getName());
-            // Imprimir archivos para confirmar
             File[] files = folder.listFiles();
             if (files != null) {
                 for (File f : files) if (f.isFile()) System.out.println("  - " + f.getName());
@@ -29,13 +28,10 @@ public class MusicServer {
 
         try (DatagramSocket socket = new DatagramSocket(port)) {
             while (true) {
-                // CORRECCIÓN IMPORTANTE: Crear buffer nuevo por cada cliente
-                // para evitar que se borren los datos en el multihilo.
+                // Buffer fresco para cada petición inicial
                 byte[] buffer = new byte[1024];
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-                
                 socket.receive(packet);
-                
                 // Procesar en un hilo independiente
                 new Thread(() -> handleRequest(socket, packet)).start();
             }
@@ -46,16 +42,12 @@ public class MusicServer {
 
     private void handleRequest(DatagramSocket serverSocket, DatagramPacket requestPacket) {
         try {
-            // Extraer mensaje limpio
             String message = new String(requestPacket.getData(), 0, requestPacket.getLength()).trim();
             String[] parts = message.split(":", 2);
             String command = parts[0];
             
             InetAddress clientIP = requestPacket.getAddress();
             int clientPort = requestPacket.getPort();
-
-            // Log simple para ver qué pasa
-            // System.out.println("Comando recibido: " + command);
 
             if (command.equals("LIST")) {
                 File folder = new File(musicFolder);
@@ -113,18 +105,20 @@ public class MusicServer {
             int nextSeqNum = 0;
             boolean paused = false; 
             boolean finished = false;
+            long lastCommandTime = 0;
 
             while (base < totalPackets && !finished) {
                 // 1. Enviar ventana
                 while (nextSeqNum < base + WINDOW_SIZE && nextSeqNum < totalPackets) {
-                    if (!paused) {
-                        byte[] packetData = createPacket(nextSeqNum, fileBytes);
-                        streamSocket.send(new DatagramPacket(packetData, packetData.length, clientIP, clientPort));
-                        nextSeqNum++;
-                    } else { 
-                        // Si está pausado, esperamos un poco para no quemar CPU
-                        Thread.sleep(50); 
+                    // FIX CRÍTICO: Si está pausado, salimos del bucle de envío 
+                    // para escuchar si llega el comando RESUME.
+                    if (paused) {
+                        break; 
                     }
+
+                    byte[] packetData = createPacket(nextSeqNum, fileBytes);
+                    streamSocket.send(new DatagramPacket(packetData, packetData.length, clientIP, clientPort));
+                    nextSeqNum++;
                 }
 
                 // 2. Escuchar ACKs o Comandos
@@ -136,30 +130,35 @@ public class MusicServer {
                     
                     if (msg.startsWith("ACK:")) {
                         int ack = Integer.parseInt(msg.split(":")[1]);
-                        // GBN Acumulativo
                         if (ack >= base) {
                             base = ack + 1;
                         }
                     }
                     else if (msg.equals("PAUSE")) {
                         paused = true;
+                        System.out.println("Pausado para " + clientPort);
                     }
                     else if (msg.equals("RESUME")) {
                         paused = false;
+                        System.out.println("Reanudado para " + clientPort);
                     }
                     else if (msg.startsWith("SKIP:")) { 
-                        // ADELANTAR ~10 segundos (aprox 400 paquetes de 1KB)
-                        base += 400; 
-                        if (base >= totalPackets) base = totalPackets - 1;
-                        nextSeqNum = base; 
-                        System.out.println(">> Salto adelante");
+                        if (System.currentTimeMillis() - lastCommandTime > 200) {
+                            base += 400; 
+                            if (base >= totalPackets) base = totalPackets - 1;
+                            nextSeqNum = base; 
+                            System.out.println(">> Salto adelante a: " + base);
+                            lastCommandTime = System.currentTimeMillis();
+                        }
                     }
                     else if (msg.equals("REWIND")) {
-                        // ATRASAR ~10 segundos
-                        base -= 400; 
-                        if (base < 0) base = 0; 
-                        nextSeqNum = base;
-                        System.out.println("<< Rebobinado");
+                        if (System.currentTimeMillis() - lastCommandTime > 200) {
+                            base -= 400; 
+                            if (base < 0) base = 0; 
+                            nextSeqNum = base;
+                            System.out.println("<< Rebobinado a: " + base);
+                            lastCommandTime = System.currentTimeMillis();
+                        }
                     }
                     else if (msg.equals("STOP")) {
                         finished = true;
@@ -167,13 +166,13 @@ public class MusicServer {
                     
                 } catch (SocketTimeoutException e) {
                     // Timeout esperando ACK: reenviar ventana
+                    // Si estaba pausado, esto ocurrirá constantemente (loop de espera), lo cual está bien.
                     nextSeqNum = base;
                 }
             }
             
-            // Fin de transmisión
             streamSocket.send(new DatagramPacket("END".getBytes(), 3, clientIP, clientPort));
-            System.out.println("Fin de canción.");
+            System.out.println("Fin de canción para " + clientPort);
 
         } catch (Exception e) { e.printStackTrace(); }
     }
@@ -182,12 +181,10 @@ public class MusicServer {
         int start = seqNum * DATA_SIZE;
         int length = Math.min(DATA_SIZE, fileData.length - start);
         byte[] packet = new byte[4 + length];
-        // Header 4 bytes
         packet[0] = (byte) (seqNum >> 24); 
         packet[1] = (byte) (seqNum >> 16);
         packet[2] = (byte) (seqNum >> 8); 
         packet[3] = (byte) (seqNum);
-        // Data
         System.arraycopy(fileData, start, packet, 4, length);
         return packet;
     }
